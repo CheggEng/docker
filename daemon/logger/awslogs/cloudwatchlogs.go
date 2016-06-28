@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"bytes"
+	"regexp"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
@@ -29,6 +31,8 @@ const (
 	logGroupKey           = "awslogs-group"
 	logStreamKey          = "awslogs-stream"
 	batchPublishFrequency = 5 * time.Second
+	multiLineRegex        = "^\\s*foo"
+	maximumMultiLineBuff  = 4000
 
 	// See: http://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutLogEvents.html
 	perEventBytes          = 26
@@ -45,6 +49,7 @@ const (
 	userAgentHeader = "User-Agent"
 )
 
+
 type logStream struct {
 	logStreamName string
 	logGroupName  string
@@ -53,6 +58,8 @@ type logStream struct {
 	lock          sync.RWMutex
 	closed        bool
 	sequenceToken *string
+	multiLineBuffer bytes.Buffer
+	lastMessage    *logger.Message
 }
 
 type api interface {
@@ -98,6 +105,8 @@ func New(ctx logger.Context) (logger.Logger, error) {
 		client:        client,
 		messages:      make(chan *logger.Message, 4096),
 	}
+
+
 	err = containerStream.create()
 	if err != nil {
 		return nil, err
@@ -165,7 +174,40 @@ func (l *logStream) Log(msg *logger.Message) error {
 	l.lock.RLock()
 	defer l.lock.RUnlock()
 	if !l.closed {
-		l.messages <- msg
+		// check if message matches regex
+		var match_regex bool
+		match_regex, err = regexp.Match(multiLineRegex, msg.Line)
+		if err != nil {
+			// error handling
+		}
+		if match_regex {
+			// if it does match then construct the message and flush the buffer
+			if l.lastMessage != nil {
+				l.lastMessage.Line = l.multiLineBuffer.Bytes()
+				l.messages <- l.lastMessage
+				l.multiLineBuffer.Reset()
+				l.lastMessage = nil
+				return nil
+			}
+		}
+		if l.lastMessage == nil {
+			// copy current message struct to 'lastMessage' so we have the correct log attributes
+			// when we flush this event
+			*l.lastMessage = *msg
+		}
+		// check the size of the buffer
+		if l.multiLineBuffer.Len() < maximumMultiLineBuff {
+			l.multiLineBuffer.Write("\n")
+		} else {
+			// buffer is too big so flush and continue
+			l.lastMessage.Line = l.multiLineBuffer.Bytes()
+			l.messages <- l.lastMessage
+			l.multiLineBuffer.Reset()
+			l.lastMessage = nil
+			return nil
+		}
+		l.multiLineBuffer.Write(msg.Line)
+
 	}
 	return nil
 }
