@@ -53,6 +53,7 @@ type logStream struct {
 	lock          sync.RWMutex
 	closed        bool
 	sequenceToken *string
+	containerID   string
 }
 
 type api interface {
@@ -88,6 +89,7 @@ func init() {
 func New(ctx logger.Context) (logger.Logger, error) {
 	logGroupName := ctx.Config[logGroupKey]
 	logStreamName := ctx.ContainerID
+	containerId := ctx.ContainerID[0:12] + "- "
 	if ctx.Config[logStreamKey] != "" {
 		logStreamName = ctx.Config[logStreamKey]
 	}
@@ -100,6 +102,7 @@ func New(ctx logger.Context) (logger.Logger, error) {
 		logGroupName:  logGroupName,
 		client:        client,
 		messages:      make(chan *logger.Message, 4096),
+		containerID: containerId,
 	}
 	err = containerStream.create()
 	if err != nil {
@@ -163,6 +166,8 @@ func (l *logStream) Name() string {
 
 // Log submits messages for logging by an instance of the awslogs logging driver
 func (l *logStream) Log(msg *logger.Message) error {
+	cIdBytes := []byte(l.containerID)
+	msg.Line = append(cIdBytes, msg.Line...)
 	l.lock.RLock()
 	defer l.lock.RUnlock()
 	if !l.closed {
